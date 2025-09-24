@@ -1,0 +1,223 @@
+import requests
+import json
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+from pydantic import BaseModel
+
+class UserProfile(BaseModel):
+    user_id: str
+    name: str
+    preferences: Dict[str, str] = {}
+    prefer_format: Optional[str] = None  # New field for preferred format
+    last_updated: Optional[datetime] = None
+
+class GraphitiClient:
+    def __init__(self, base_url: str = "http://localhost:8000", auth_cookie: str = "opengpts_user_id"):
+        self.base_url = base_url
+        self.auth_cookie = auth_cookie
+
+    def _make_request(self, method: str, endpoint: str, user_id: str, data: Optional[Dict] = None) -> Dict:
+        """Helper method to make HTTP requests to Graphiti API."""
+        headers = {"Content-Type": "application/json"}
+        cookies = {self.auth_cookie: user_id}
+        url = f"{self.base_url}{endpoint}"
+        
+        try:
+            if method == "GET":
+                response = requests.get(url, headers=headers, cookies=cookies)
+            elif method == "POST":
+                response = requests.post(url, headers=headers, cookies=cookies, json=data)
+            elif method == "PUT":
+                response = requests.put(url, headers=headers, cookies=cookies, json=data)
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
+            
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            raise Exception(f"Graphiti API request failed: {str(e)}")
+
+    def create_user_profile(self, user_id: str, name: str, preferences: Dict[str, str], prefer_format: Optional[str] = None) -> Dict:
+        """Create a user profile as a Graphiti entity and episode."""
+        # Create entity for the user
+        entity_data = {
+            "name": name,
+            "type": "User",
+            "attributes": {
+                "user_id": user_id,
+                "preferences": preferences,
+                "prefer_format": prefer_format  # Include prefer_format in entity attributes
+            }
+        }
+        entity_response = self._make_request("POST", "/entities", user_id, entity_data)
+        
+        # Create an episode to record profile creation
+        episode_data = {
+            "name": f"UserProfileCreation_{user_id}",
+            "episode_body": json.dumps({
+                "user_id": user_id,
+                "name": name,
+                "preferences": preferences,
+                "prefer_format": prefer_format,  # Include prefer_format in episode
+                "event": "profile_created"
+            }),
+            "source": "text",
+            "source_description": "User profile creation",
+            "reference_time": datetime.now(timezone.utc).isoformat()
+        }
+        episode_response = self._make_request("POST", "/episodes", user_id, episode_data)
+        
+        return {
+            "entity": entity_response,
+            "episode": episode_response
+        }
+
+    def update_user_profile(self, user_id: str, name: Optional[str] = None, preferences: Optional[Dict[str, str]] = None, prefer_format: Optional[str] = None) -> Dict:
+        """Update user profile attributes in Graphiti."""
+        # Fetch existing entity
+        entity = self.get_user_profile(user_id)
+        if not entity:
+            raise ValueError(f"No profile found for user_id: {user_id}")
+        
+        entity_id = entity.get("uuid")
+        current_attributes = entity.get("attributes", {})
+        
+        # Update attributes
+        if name:
+            current_attributes["name"] = name
+        if preferences:
+            current_attributes["preferences"] = preferences
+        if prefer_format is not None:  # Update prefer_format if provided
+            current_attributes["prefer_format"] = prefer_format
+        
+        update_data = {
+            "name": name or entity.get("name"),
+            "type": "User",
+            "attributes": current_attributes
+        }
+        entity_response = self._make_request("PUT", f"/entities/{entity_id}", user_id, update_data)
+        
+        # Create an episode for the update
+        episode_data = {
+            "name": f"UserProfileUpdate_{user_id}",
+            "episode_body": json.dumps({
+                "user_id": user_id,
+                "name": name or entity.get("name"),
+                "preferences": preferences or current_attributes.get("preferences"),
+                "prefer_format": prefer_format or current_attributes.get("prefer_format"),  # Include existing or new prefer_format
+                "event": "profile_updated"
+            }),
+            "source": "text",
+            "source_description": "User profile update",
+            "reference_time": datetime.now(timezone.utc).isoformat()
+        }
+        episode_response = self._make_request("POST", "/episodes", user_id, episode_data)
+        
+        return {
+            "entity": entity_response,
+            "episode": episode_response
+        }
+
+    def get_user_profile(self, user_id: str) -> Optional[Dict]:
+        """Retrieve user profile by searching Graphiti entities."""
+        search_data = {
+            "query": f"user_id:{user_id}",
+            "search_type": "semantic"
+        }
+        results = self._make_request("POST", "/search", user_id, search_data)
+        
+        for result in results.get("results", []):
+            if result.get("type") == "entity" and result.get("attributes", {}).get("user_id") == user_id:
+                return result
+        return None
+
+    def add_user_interaction(self, user_id: str, interaction: str) -> Dict:
+        """Add a user interaction as an episode in Graphiti."""
+        episode_data = {
+            "name": f"UserInteraction_{user_id}_{datetime.now(timezone.utc).timestamp()}",
+            "episode_body": json.dumps({
+                "user_id": user_id,
+                "interaction": interaction,
+                "event": "user_interaction"
+            }),
+            "source": "text",
+            "source_description": "User interaction",
+            "reference_time": datetime.now(timezone.utc).isoformat()
+        }
+        return self._make_request("POST", "/episodes", user_id, episode_data)
+
+class OpenGPTsGraphitiIntegration:
+    def __init__(self, graphiti_client: GraphitiClient):
+        self.client = graphiti_client
+
+    def initialize_user_profile(self, user_id: str, name: str, preferences: Dict[str, str], prefer_format: Optional[str] = None) -> UserProfile:
+        """Initialize a user profile in OpenGPTs with Graphiti."""
+        profile_data = self.client.create_user_profile(user_id, name, preferences, prefer_format)
+        return UserProfile(
+            user_id=user_id,
+            name=profile_data["entity"]["name"],
+            preferences=profile_data["entity"]["attributes"]["preferences"],
+            prefer_format=profile_data["entity"]["attributes"].get("prefer_format"),  # Retrieve prefer_format
+            last_updated=datetime.now(timezone.utc)
+        )
+
+    def get_user_profile(self, user_id: str) -> Optional[UserProfile]:
+        """Retrieve a user profile from Graphiti for OpenGPTs."""
+        profile_data = self.client.get_user_profile(user_id)
+        if profile_data:
+            return UserProfile(
+                user_id=user_id,
+                name=profile_data["name"],
+                preferences=profile_data["attributes"].get("preferences", {}),
+                prefer_format=profile_data["attributes"].get("prefer_format"),  # Retrieve prefer_format
+                last_updated=datetime.fromisoformat(profile_data["updated_at"]) if profile_data.get("updated_at") else None
+            )
+        return None
+
+    def update_user_profile(self, user_id: str, name: Optional[str] = None, preferences: Optional[Dict[str, str]] = None, prefer_format: Optional[str] = None) -> UserProfile:
+        """Update a user profile in OpenGPTs with Graphiti."""
+        profile_data = self.client.update_user_profile(user_id, name, preferences, prefer_format)
+        return UserProfile(
+            user_id=user_id,
+            name=profile_data["entity"]["name"],
+            preferences=profile_data["entity"]["attributes"]["preferences"],
+            prefer_format=profile_data["entity"]["attributes"].get("prefer_format"),  # Retrieve prefer_format
+            last_updated=datetime.now(timezone.utc)
+        )
+
+    def record_interaction(self, user_id: str, interaction: str) -> None:
+        """Record a user interaction in Graphiti."""
+        self.client.add_user_interaction(user_id, interaction)
+
+# Example usage within OpenGPTs
+if __name__ == "__main__":
+    # Initialize Graphiti client
+    client = GraphitiClient()
+    
+    # Initialize OpenGPTs integration
+    integration = OpenGPTsGraphitiIntegration(client)
+    
+    # Create a user profile
+    user_id = "foo"
+    profile = integration.initialize_user_profile(
+        user_id=user_id,
+        name="John Doe",
+        preferences={"language": "English", "theme": "dark"},
+        prefer_format="json"  # Example prefer_format value
+    )
+    print(f"Created profile: {profile}")
+    
+    # Update user profile
+    updated_profile = integration.update_user_profile(
+        user_id=user_id,
+        preferences={"language": "Spanish", "theme": "light"},
+        prefer_format="yaml"  # Update prefer_format
+    )
+    print(f"Updated profile: {updated_profile}")
+    
+    # Retrieve user profile
+    retrieved_profile = integration.get_user_profile(user_id)
+    print(f"Retrieved profile: {retrieved_profile}")
+    
+    # Record an interaction
+    integration.record_interaction(user_id, "User asked about weather in SF")
