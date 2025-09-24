@@ -1,0 +1,32 @@
+将用户画像注入到系统提示（Prompt）
+
+获取到用户画像后，我们需要将其格式化并注入到对话的系统提示中，以指导 LLM 生成个性化回复。常见做法是将结构化的画像信息（如 JSON 或自然语言描述）追加到系统角色消息中。以 LangChain 的消息体系为例，可做如下处理：
+
+from langchain.schema import SystemMessage
+
+def prepend_profile_to_system(state):
+    profile = state.context.get("user_profile", {})
+    if profile:
+        # 构造结构化描述字符串
+        profile_str = (
+            f"用户画像信息：\n"
+            f"- 姓名: {profile.get('name', '未知')}\n"
+            f"- 语言: {profile.get('language', '未知')}\n"
+            f"- 位置: {profile.get('location', '未知')}\n"
+            f"- 时区: {profile.get('timezone', '未知')}\n"
+        )
+        # 将用户画像插入到系统消息最前面
+        system_msg = SystemMessage(content=profile_str)
+        state.messages.insert(0, system_msg)  # 插入为第一条系统提示
+    return state
+
+# 在图中调用此节点，将用户画像注入
+graph.add_node(
+    name="InjectUserProfile",
+    func=prepend_profile_to_system,
+    inputs=["RetrieveUserProfile"],  # 确保在获取画像后执行
+    outputs=["*"]
+)
+
+
+以上代码利用 LangChain 的 SystemMessage 类型，将用户画像信息插入到消息序列的最前面。完成后，系统提示（System Prompt）中就包含了用户个人信息，后续的模型调用就会考虑这些定制化上下文内容。
