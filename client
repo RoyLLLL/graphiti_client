@@ -1,0 +1,187 @@
+# utils/graphiti_client.py
+import requests
+from typing import List, Dict, Any, Optional
+
+
+class UserProfile:
+    """
+    A structured representation of a user's profile extracted from the Graphiti knowledge graph.
+    """
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        language: Optional[str] = None,
+        location: Optional[str] = None,
+        preferred_format: Optional[str] = None,
+        **kwargs
+    ):
+        self.name = name
+        self.language = language
+        self.location = location
+        self.preferred_format = preferred_format  # e.g., "markdown" or "text"
+        # You can extend this with more fields if needed
+
+    def to_text(self) -> str:
+        """
+        Format the user profile as a natural language description to inject into the system prompt.
+        """
+        lines = ["User Profile:"]
+        if self.name:
+            lines.append(f"- Name: {self.name}")
+        if self.language:
+            lines.append(f"- Language: {self.language}")
+        if self.location:
+            lines.append(f"- Location: {self.location}")
+        if self.preferred_format:
+            lines.append(f"- Preferred Format: {self.preferred_format}")
+        return "\n".join(lines)
+
+
+class GraphitiClient:
+    """
+    A lightweight client SDK to interact with a Graphiti server (REST API) from OpenGPTs.
+    """
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+
+    # ---------------------------
+    # 1. Upload conversation → create an episode
+    # ---------------------------
+    def upload_conversation(self, user_id: str, text: str) -> Optional[str]:
+        """
+        Upload a conversation text as a new episode.
+        Returns the created episode UUID if successful.
+        """
+        url = f"{self.base_url}/graph/episodes"
+        payload = {
+            "name": f"Conversation_{user_id}",
+            "episode_body": text,
+            "source": "opengpts",
+            "source_description": "User conversation from chatbot",
+        }
+        try:
+            resp = requests.post(url, json=payload)
+            resp.raise_for_status()
+            return resp.json().get("episode_uuid") or resp.json().get("uuid")
+        except requests.RequestException as e:
+            print(f"[Graphiti] Failed to upload conversation: {e}")
+            return None
+
+    # ---------------------------
+    # 2. Extract information from text
+    # ---------------------------
+    def extract_user_info(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Call Graphiti's /graph/extract endpoint to extract structured user information.
+        This is useful if you want to pre-parse info before linking it into the graph.
+        """
+        url = f"{self.base_url}/graph/extract"
+        payload = {"text": text}
+        try:
+            resp = requests.post(url, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            print(f"[Graphiti] Failed to extract user info: {e}")
+            return None
+
+    # ---------------------------
+    # 3. Link extracted info as nodes/edges (optional, handled automatically by episodes too)
+    # ---------------------------
+    def add_user_fact(self, user_id: str, fact: str) -> bool:
+        """
+        Add a user fact as a new edge connected to the user node.
+        Example fact: "Preferred format: markdown"
+        """
+        # You might have a specific endpoint for adding edges. This example uses /graph/node/{uuid}/entity-edges
+        user_nodes = self.get_user_nodes(user_id)
+        if not user_nodes:
+            print("[Graphiti] No user node found to attach fact.")
+            return False
+        user_node_uuid = user_nodes[0].get("uuid")
+
+        url = f"{self.base_url}/graph/node/{user_node_uuid}/entity-edges"
+        payload = {"fact": fact}
+        try:
+            resp = requests.post(url, json=payload)
+            resp.raise_for_status()
+            return True
+        except requests.RequestException as e:
+            print(f"[Graphiti] Failed to add user fact: {e}")
+            return False
+
+    # ---------------------------
+    # 4. Query user graph → nodes
+    # ---------------------------
+    def get_user_nodes(self, user_id: str) -> List[Dict[str, Any]]:
+        """
+        Fetch all graph nodes related to a given user.
+        """
+        url = f"{self.base_url}/graph/node/user/{user_id}"
+        try:
+            resp = requests.post(url, json={})
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("nodes", data.get("entity_nodes", []))
+        except requests.RequestException as e:
+            print(f"[Graphiti] Failed to fetch user nodes: {e}")
+            return []
+
+    # ---------------------------
+    # 5. Query node edges → facts
+    # ---------------------------
+    def get_node_edges(self, node_uuid: str) -> List[Dict[str, Any]]:
+        """
+        Fetch edges (facts) related to a specific node.
+        """
+        url = f"{self.base_url}/graph/node/{node_uuid}/entity-edges"
+        try:
+            resp = requests.get(url)
+            resp.raise_for_status()
+            return resp.json().get("edges", [])
+        except requests.RequestException as e:
+            print(f"[Graphiti] Failed to fetch edges: {e}")
+            return []
+
+    # ---------------------------
+    # 6. Assemble user profile
+    # ---------------------------
+    def get_user_profile(self, user_id: str) -> Optional[str]:
+        """
+        Retrieve the user profile by traversing user nodes and their connected facts.
+        """
+        nodes = self.get_user_nodes(user_id)
+        if not nodes:
+            return None
+
+        profile = UserProfile()
+
+        for node in nodes:
+            node_uuid = node.get("uuid") or node.get("node_uuid")
+            node_type = node.get("type") or node.get("label")
+            properties = node.get("properties", {})
+
+            if node_type == "User" or node.get("is_user_node"):
+                profile.name = properties.get("name") or profile.name
+                profile.language = properties.get("language") or profile.language
+                profile.location = properties.get("location") or profile.location
+                profile.preferred_format = (
+                    properties.get("preferred_format") or profile.preferred_format
+                )
+            else:
+                # Traverse edges for additional info
+                edges = self.get_node_edges(node_uuid)
+                for edge in edges:
+                    fact = edge.get("fact", "").lower()
+                    if "name" in fact:
+                        profile.name = fact.split(":")[-1].strip()
+                    if "language" in fact:
+                        profile.language = fact.split(":")[-1].strip()
+                    if "location" in fact:
+                        profile.location = fact.split(":")[-1].strip()
+                    if "preferred format" in fact:
+                        profile.preferred_format = fact.split(":")[-1].strip()
+
+        return profile.to_text() if profile.to_text() else None
