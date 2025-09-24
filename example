@@ -1,0 +1,127 @@
+1. Import the SDK
+# example_graphiti_usage.py
+from utils.graphiti_client import GraphitiClient
+
+# Initialize the Graphiti client (replace with your server URL)
+client = GraphitiClient(base_url="http://localhost:8000")
+
+✅ Example 1: Upload a user's profile manually
+
+If you already know some profile info (e.g., collected from signup or form),
+you can add it directly to Graphiti as knowledge.
+
+user_id = "user_123"
+
+# Add individual facts (they will be stored as edges in the graph)
+client.add_user_fact(user_id, "Name: Alice")
+client.add_user_fact(user_id, "Language: English")
+client.add_user_fact(user_id, "Location: Singapore")
+client.add_user_fact(user_id, "Preferred format: markdown")
+
+print("✅ User profile uploaded successfully!")
+
+
+👉 This will create a User node and store those details as edges/properties.
+
+✅ Example 2: Upload conversation messages (let Graphiti auto-extract profile)
+
+This is the typical OpenGPTs scenario — after each chat session,
+you send the whole conversation history to Graphiti.
+
+Graphiti will:
+
+parse the text
+
+extract structured info (like preferred format, interests, etc.)
+
+update the user graph
+
+# Simulate a conversation history
+conversation_messages = [
+    {"role": "user", "content": "Hi, I’m Alice. I live in Singapore and prefer markdown for responses."},
+    {"role": "assistant", "content": "Great, Alice. I’ll use markdown from now on."},
+    {"role": "user", "content": "Can you show me the data as a markdown table?"}
+]
+
+# Combine conversation into a single text body
+conversation_text = "\n".join(
+    [f"{m['role']}: {m['content']}" for m in conversation_messages]
+)
+
+# Upload as an episode
+episode_uuid = client.upload_conversation(user_id, conversation_text)
+print("✅ Conversation uploaded, episode ID:", episode_uuid)
+
+# (Optional) Directly extract structured info from the conversation
+extracted_info = client.extract_user_info(conversation_text)
+print("🔍 Extracted info:", extracted_info)
+
+
+💡 Most of the time, you don’t need to manually parse extracted_info —
+Graphiti will already link this to the user node in the background.
+
+✅ Example 3: Retrieve the user's profile for next session
+
+Now, when the user comes back later, you want to personalize the chatbot.
+Before the conversation starts, fetch their profile and inject it into your system prompt:
+
+# Retrieve and format the profile
+profile_text = client.get_user_profile(user_id)
+
+if profile_text:
+    print("📥 Retrieved user profile:\n", profile_text)
+else:
+    print("⚠️ No profile found for this user yet.")
+
+# Use profile in your chatbot's system prompt
+system_prompt = f"""
+You are a helpful assistant.
+
+User context:
+{profile_text or "No profile known yet."}
+
+When responding, always follow the user's preferences if available.
+"""
+
+✅ Full Workflow Summary
+
+Here’s the recommended call order in a real LangGraph chatbot:
+
+🔄 First time user interacts:
+# 1. Upload conversation history → Graphiti auto-extracts
+client.upload_conversation(user_id, conversation_text)
+
+
+(optional):
+
+# 2. Or manually add specific profile info
+client.add_user_fact(user_id, "Preferred format: markdown")
+
+🔄 At the start of each session:
+# 3. Fetch stored user profile for prompt injection
+profile_text = client.get_user_profile(user_id)
+
+🔄 During the session:
+# 4. After N messages, upload conversation again to refine profile
+client.upload_conversation(user_id, new_conversation_text)
+
+🧠 Real-World Tips
+
+✅ Best practice: Upload the full message list every N turns (or every session).
+✅ Custom fields: You can define any new profile field (e.g. preferred_format, interests, device_type) — Graphiti’s entity extraction will store them as node properties or edge facts.
+✅ Prompt injection: Always inject the latest profile_text into your system_prompt before generating responses.
+
+🧪 Sample Output
+📥 Retrieved user profile:
+User Profile:
+- Name: Alice
+- Language: English
+- Location: Singapore
+- Preferred Format: markdown
+
+
+→ Then the chatbot automatically responds in Markdown next time without you writing any custom logic.
+
+Would you like me to show how this profile injection looks inside a LangGraph node (so it automatically runs before every LLM call)? – That’s the final step to make this production-ready.
+
+ChatGPT can make mistakes. Check important
